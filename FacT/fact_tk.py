@@ -13,9 +13,12 @@ from timm.scheduler.cosine_lr import CosineLRScheduler
 from argparse import ArgumentParser
 from vtab import *
 import yaml
-
+import wandb
 
 def train(args, model, dl, opt, scheduler, epoch):
+    train_matrics = {}
+    test_matrics = {}
+    print_freq=200
     model.train()
     model = model.cuda()
     pbar = tqdm(range(epoch))
@@ -29,6 +32,12 @@ def train(args, model, dl, opt, scheduler, epoch):
             opt.zero_grad()
             loss.backward()
             opt.step()
+            if i % print_freq == 0:
+                # print(f'batch {i}/{total_batch} loss: {loss} mem: {torch.cuda.max_memory_allocated()/(1024.0 * 1024.0)}MB')
+                train_matrics['loss'] = loss
+                train_matrics['lr'] = opt.param_groups[0]["lr"]
+                wandb.log(train_matrics)
+            
         if scheduler is not None:
             scheduler.step(ep)
         if ep % 10 == 9:
@@ -37,6 +46,10 @@ def train(args, model, dl, opt, scheduler, epoch):
                 args.best_acc = acc
                 save(args, model, acc, ep)
             pbar.set_description(str(acc) + '|' + str(args.best_acc))
+
+            test_matrics['acc'] = acc
+            test_matrics['best_acc'] = args.best_acc
+            wandb.log(test_matrics)
 
     model = model.cpu()
     return model
@@ -159,34 +172,50 @@ def save(args, model, acc, ep):
     for n, p in vit.named_parameters():
         if 'FacT' in n or 'head' in n:
             trainable[n] = p.data
-    torch.save(trainable, 'models/tk/' + args.dataset + '.pt')
-    with open('models/tk/' + args.dataset + '.log', 'w') as f:
-        f.write(str(ep) + ' ' + str(acc))
+    torch.save(trainable, args.save_path +'/' + 'lastmodel.pt')
+    # with open(args.save_path + '/' + args.dataset + '.log', 'w') as f:
+    #     f.write(str(ep) + ' ' + str(acc))
 
 
 if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument('--seed', type=int, default=42)
-
     parser.add_argument('--dim', type=int, default=0)
     parser.add_argument('--scale', type=float, default=0)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--wd', type=float, default=1e-4)
     parser.add_argument('--model', type=str, default='vit_base_patch16_224_in21k')
     parser.add_argument('--dataset', type=str, default='cifar')
+    parser.add_argument('--save_path', type=str, default='/data/lora_output/FACT')
+    parser.add_argument('--batch_size', type=int, default=32)
+    
+
     args = parser.parse_args()
-    print(args)
-    seed = args.seed
-    set_seed(seed)
+    args.save_path = os.path.join(args.save_path, 'fact_tt')
+    args.save_path = os.path.join(args.save_path, args.dataset)
     name = args.dataset
-    args.best_acc = 0
-    vit = create_model(args.model, checkpoint_path='./ViT-B_16.npz', drop_path_rate=0.1)
-    train_dl, test_dl = get_data(name)
     config = get_config(name)
     if args.dim == 0:
         args.dim = config['rank']
     if args.scale == 0:
         args.scale = config['scale']
+    if not os.path.exists(args.save_path):
+        os.makedirs(args.save_path)
+    
+    wandb_dir = '/data/lora_output/0831'
+    if not os.path.exists(wandb_dir):
+        os.makedirs(wandb_dir)
+    wandb.init(entity='bazinga699',project='fact', config=args, dir=wandb_dir, tags=[f'fact_tk'], name=f'fact_tk-{args.dataset}')
+
+    args.lr = args.batch_size / 64 * args.lr
+    print(args)
+    seed = args.seed
+    set_seed(seed)
+    
+    args.best_acc = 0
+    vit = create_model(args.model, checkpoint_path='/data/pretrained_models/ViT-B_16.npz', drop_path_rate=0.1)
+    train_dl, test_dl = get_data(name, batch_size=args.batch_size)
+    
     set_FacT(vit, dim=args.dim, s=args.scale)
 
     trainable = []
@@ -199,9 +228,10 @@ if __name__ == '__main__':
                 total_param += p.numel()
         else:
             p.requires_grad = False
-    print('total_param', total_param)
+    print('total_param', total_param/1000000,"M")
     opt = AdamW(trainable, lr=args.lr, weight_decay=args.wd)
     scheduler = CosineLRScheduler(opt, t_initial=100,
                                   warmup_t=10, lr_min=1e-5, warmup_lr_init=1e-6, decay_rate=0.1)
     vit = train(args, vit, train_dl, opt, scheduler, epoch=100)
     print('acc1:', args.best_acc)
+
