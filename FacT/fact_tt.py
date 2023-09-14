@@ -38,15 +38,36 @@ D_type = {
     'smallnorb_ele':2,
 }
 
+# class MOEweight(nn.Module):
+#     def __init__(self, channel, expert_num, tau, hidden_dim = 8):
+#         super(MOEweight, self).__init__()
+#         # self.mlp = nn.Sequential(
+#         #     nn.Linear(channel, hidden_dim, bias=False),
+#         #     nn.ReLU(inplace=True),
+#         #     nn.Linear(hidden_dim, expert_num, bias=False),
+#         # )
+#         # self.apply(self._init_weights)
+#         self.expert_num = expert_num
+#         self.tau = tau
+
+#     def _init_weights(self, m):
+#         if isinstance(m, (nn.Conv2d, nn.Linear)):
+#             trunc_normal_(m.weight, std=.02)
+
+#     def forward(self, x):
+#         y = torch.zeros((*x.mean(1).shape[:-1], self.expert_num)).type(x.dtype).to(x.device).fill_(1/self.expert_num)
+#         return y
+
 class MOEweight(nn.Module):
     def __init__(self, channel, expert_num, tau, hidden_dim = 8):
         super(MOEweight, self).__init__()
-        # self.mlp = nn.Sequential(
-        #     nn.Linear(channel, hidden_dim, bias=False),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(hidden_dim, expert_num, bias=False),
-        # )
-        # self.apply(self._init_weights)
+        self.mlp = nn.Sequential(
+            nn.Linear(channel, hidden_dim, bias=False),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, expert_num, bias=False),
+        )
+        self.apply(self._init_weights)
         self.expert_num = expert_num
         self.tau = tau
 
@@ -55,9 +76,10 @@ class MOEweight(nn.Module):
             trunc_normal_(m.weight, std=.02)
 
     def forward(self, x):
-        y = torch.zeros((*x.mean(1).shape[:-1], self.expert_num)).type(x.dtype).to(x.device).fill_(1/self.expert_num)
+        y = x.mean(dim=[1])
+        y = self.mlp(y)
+        y = F.softmax(y / self.tau, dim=1) # B x expert num
         return y
-
 
 
 
@@ -268,11 +290,11 @@ if __name__ == '__main__':
         args.scale = config['scale']
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
-    args.lr *= args.expert_num
+    # args.lr *= args.expert_num
     wandb_dir = '/data/lora_output/0913'
     if not os.path.exists(wandb_dir):
         os.makedirs(wandb_dir)
-    wandb.init(entity='bazinga699',project='fact', config=args, dir=wandb_dir, tags=[f'fact_tt_moe_avg_scalelr'], name=f'fact_tt-{args.dataset}')
+    wandb.init(entity='bazinga699',project='fact', config=args, dir=wandb_dir, tags=[f'fact_tt_moe_LN'], name=f'fact_tt-{args.dataset}')
 
     #args.lr = args.batch_size / 64 * args.lr
     print(args)
