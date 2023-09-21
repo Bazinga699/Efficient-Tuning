@@ -15,6 +15,7 @@ from vtab import *
 import yaml
 import wandb
 from timm.models.layers import trunc_normal_
+import math
 
 D_type = {
     'caltech101':0,
@@ -57,13 +58,25 @@ D_type = {
 #     def forward(self, x):
 #         y = torch.zeros((*x.mean(1).shape[:-1], self.expert_num)).type(x.dtype).to(x.device).fill_(1/self.expert_num)
 #         return y
+def adjust_gs_temperature(epoch, step, len_epoch, args):
+        if epoch >= args.tau_last_epoch:
+            return args.tau_final
+        else:
+            T_total = args.tau_last_epoch * len_epoch
+            T_cur = epoch * len_epoch + step
+            if args.temp_scheduler == 'exp':
+                alpha = math.pow(args.tau_final / args.tau0, 1 / T_total)
+                return math.pow(alpha, T_cur) * args.tau0
+            elif args.temp_scheduler == 'linear':
+                return (args.tau0 - args.tau_final) * (1 - T_cur / T_total) + args.tau_final
+            else:
+                return 0.5 * (args.tau0-args.tau_final) * (1 + math.cos(math.pi * T_cur / (T_total))) + args.tau_final
 
 class MOEweight(nn.Module):
     def __init__(self, channel, expert_num, tau, hidden_dim = 8):
         super(MOEweight, self).__init__()
         self.mlp = nn.Sequential(
             nn.Linear(channel, hidden_dim, bias=False),
-            nn.LayerNorm(hidden_dim),
             nn.ReLU(inplace=True),
             nn.Linear(hidden_dim, expert_num, bias=False),
         )
@@ -78,7 +91,7 @@ class MOEweight(nn.Module):
     def forward(self, x):
         y = x.mean(dim=[1])
         y = self.mlp(y)
-        y = F.softmax(y / self.tau, dim=1) # B x expert num
+        y = F.sigmoid(y) # B x expert num
         return y
 
 
@@ -93,9 +106,16 @@ def train(args, model, dl, opt, scheduler, epoch):
     for ep in pbar:
         model.train()
         model = model.cuda()
+        total_batch = len(dl)
         # pbar = tqdm(dl)
         for i, batch in enumerate(dl):
             x, y = batch[0].cuda(), batch[1].cuda()
+
+            current_tau = adjust_gs_temperature(ep, i, total_batch, args)
+            for name, module in model.named_modules():
+                if 'moe_weight' in name:
+                    module.tau = current_tau
+
             out = model(x)
             loss = F.cross_entropy(out, y)
             opt.zero_grad()
@@ -274,8 +294,12 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--expert_num', type=int, default=2)
     parser.add_argument('--moe_dim', type=int, default=8)
-    parser.add_argument('--tau', type=int, default=1)
+    parser.add_argument('--tau', type=float, default=1)
     parser.add_argument('--dataset_type', type=int, default=0)
+    parser.add_argument('--temp_scheduler', type=str, default='cos')
+    parser.add_argument('--tau_final', type=float, default=30.)
+    parser.add_argument('--tau0', type=float, default=0.01)
+    parser.add_argument('--tau_last_epoch', type=int, default=100)
     
 
     args = parser.parse_args()
@@ -291,10 +315,10 @@ if __name__ == '__main__':
     if not os.path.exists(args.save_path):
         os.makedirs(args.save_path)
     # args.lr *= args.expert_num
-    wandb_dir = '/data/lora_output/0913'
+    wandb_dir = '/data/lora_output/0919'
     if not os.path.exists(wandb_dir):
         os.makedirs(wandb_dir)
-    wandb.init(entity='bazinga699',project='fact', config=args, dir=wandb_dir, tags=[f'fact_tt_moe_LN'], name=f'fact_tt-{args.dataset}')
+    wandb.init(entity='bazinga699',project='fact', config=args, dir=wandb_dir, tags=[f'fact_tt_sig'], name=f'fact_tt-{args.dataset}')
 
     #args.lr = args.batch_size / 64 * args.lr
     print(args)
